@@ -247,13 +247,29 @@ const TEAMS = {
 
 // ── ENDPOINTS ─────────────────────────────────────────────────────────────────
 const ANKR    = "https://rpc.ankr.com/multichain/08e12b8200893486cd2fc46d238429d1056f7a9d85676c2332a92652fe1f698a";
-// Solana public RPCs — no API key needed, tried in order until one works
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SOLANA API KEYS  (optional but recommended for reliability)
+//
+// Option A — Helius (best):  https://dev.helius.xyz  (free tier: 100k req/day)
+// Option B — Tatum:          https://dashboard.tatum.io (free tier available)
+//
+// Paste ONE key below. Leave both as "" to use free public RPCs.
+// ─────────────────────────────────────────────────────────────────────────────
+const HELIUS_API_KEY = "e5e09245-f69d-4e91-8e31-c605838e3a13"; // Helius paid key
+const TATUM_API_KEY  = ""; // ← e.g. "t-abc123..." → send as x-api-key header
+
+// Builds the RPC list — paid key goes first if provided
 const SOL_RPCS = [
-  "https://solana-rpc.publicnode.com",          // Allnodes — no key, good CORS
-  "https://solana.api.onfinality.io/public",    // OnFinality — no key
-  "https://solana.rpc.subquery.network/public", // SubQuery — no key
-  "https://solana.drpc.org",                    // dRPC — fallback
-  "https://solana-mainnet.gateway.tatum.io/",   // Tatum — fallback
+  ...(HELIUS_API_KEY
+    ? [{ url: `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`, headers: {} }]
+    : []),
+  ...(TATUM_API_KEY
+    ? [{ url: "https://solana-mainnet.gateway.tatum.io/", headers: { "x-api-key": TATUM_API_KEY } }]
+    : []),
+  { url: "https://solana-rpc.publicnode.com",          headers: {} }, // Allnodes — free, no key
+  { url: "https://rpc.ankr.com/solana",                headers: {} }, // Ankr public — free
+  { url: "https://solana.drpc.org",                    headers: {} }, // dRPC — free
 ];
 const TRON    = "https://api.trongrid.io";
 const TON_API = "https://toncenter.com/api/v2";
@@ -355,16 +371,29 @@ async function fetchEVM(wallet,team,prices) {
 async function solPost(body) {
   for (const rpc of SOL_RPCS) {
     try {
-      const r = await fetch(rpc, {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+      // Each rpc is { url, headers } — merge any auth headers with Content-Type
+      const r = await fetch(rpc.url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...rpc.headers },
+        body: JSON.stringify(body)
+      });
+      if (!r.ok) { console.warn("SOL HTTP", r.status, rpc.url); continue; }
       const d = await r.json();
-      // Skip if forbidden or error
-      if (d?.error?.code === 403 || d?.error?.code === 401 || 
-          d?.error?.message?.toLowerCase().includes("forbidden") ||
-          d?.error?.message?.toLowerCase().includes("unauthorized") ||
-          d?.error?.message?.toLowerCase().includes("access")) continue;
-      if (d?.error) { console.warn("SOL RPC error on", rpc, d.error.message); continue; }
+      if (d?.error) {
+        const msg = (d.error.message || "").toLowerCase();
+        const code = d.error.code;
+        if (code === 403 || code === 401 || code === 35 || code === -32601 ||
+            msg.includes("forbidden") || msg.includes("unauthorized") ||
+            msg.includes("not available") || msg.includes("not supported") ||
+            msg.includes("access")) {
+          console.warn("SOL RPC skip:", rpc.url, d.error.message);
+          continue;
+        }
+        console.warn("SOL RPC error:", rpc.url, d.error.message);
+        continue;
+      }
       return d;
-    } catch(e) { console.warn("SOL RPC failed:", rpc, e.message); }
+    } catch(e) { console.warn("SOL RPC failed:", rpc.url, e.message); }
   }
   return null;
 }

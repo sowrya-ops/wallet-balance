@@ -659,7 +659,13 @@ async function fetchEVM(wallet,team,prices) {
     for (const a of res.result?.assets||[]) {
       const balance=parseFloat(a.balance||0), sym=(a.tokenSymbol||"").toUpperCase();
       let usd=parseFloat(a.balanceUsd||0);
-      const net=a.blockchain?a.blockchain[0].toUpperCase()+a.blockchain.slice(1):"";
+      const ANKR_NET_MAP = {
+        eth:"Ethereum", bsc:"Bsc", polygon:"Polygon", arbitrum:"Arbitrum",
+        base:"Base", avalanche:"Avalanche", optimism:"Optimism", fantom:"Fantom",
+        solana:"Solana", tron:"Tron",
+      };
+      const rawNet = (a.blockchain||"").toLowerCase();
+      const net = ANKR_NET_MAP[rawNet] || (rawNet ? rawNet[0].toUpperCase()+rawNet.slice(1) : "");
       const isNative = (a.tokenType||"").toUpperCase() === "NATIVE";
       if (!usd&&balance&&prices[sym]) usd=balance*prices[sym];
       // Skip WETH always; skip ETH on Ethereum/Arbitrum (already fetched via direct RPC above)
@@ -1061,12 +1067,18 @@ function renderStats() { updateStats(); }
 
 function renderNetworkCards() { updateNetworkCards(); }
 
+function renderChainTabs() {
+  const allNetLabels = ALL_NETWORKS.map(n => n.label);
+  document.getElementById("chainTabs").innerHTML =
+    ["All", ...allNetLabels].map(c =>
+      `<button class="chain-tab ${c===activeChain?"active":""}" onclick="setChain('${c}')">${c}</button>`
+    ).join("");
+}
+
 function renderTable() {
   if(!allRows.length) return; // keep skeleton table until first data arrives
   const src=activeTeam==="ALL"?allRows:allRows.filter(r=>r.team===activeTeam);
-  const chains=["All",...new Set(src.map(r=>r.network))];
-  document.getElementById("chainTabs").innerHTML=chains.map(c=>
-    `<button class="chain-tab ${c===activeChain?"active":""}" onclick="setChain('${c}')">${c}</button>`).join("");
+  renderChainTabs();
 
   const rows=visible();
   if(!rows.length){document.getElementById("tableContainer").innerHTML=`<div class="state-box"><p>No holdings found.</p></div>`;return;}
@@ -1224,6 +1236,7 @@ async function loadData() {
   // Show all cards + skeleton table immediately
   renderInitialStats();
   renderInitialNetworkCards();
+  renderChainTabs();
   renderSkeletonTable();
   setStatus("Fetching prices…");
 

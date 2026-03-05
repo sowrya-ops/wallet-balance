@@ -247,12 +247,13 @@ const TEAMS = {
 
 // ── ENDPOINTS ─────────────────────────────────────────────────────────────────
 const ANKR    = "https://rpc.ankr.com/multichain/08e12b8200893486cd2fc46d238429d1056f7a9d85676c2332a92652fe1f698a";
-// Solana public RPCs — tried in order until one works
+// Solana public RPCs — no API key needed, tried in order until one works
 const SOL_RPCS = [
-  "https://solana-mainnet.g.alchemy.com/v2/demo",
-  "https://rpc.ankr.com/solana",
-  "https://solana.drpc.org",
-  "https://mainnet.helius-rpc.com/?api-key=15319bf1-7164-4b6e-8a5c-5f9b9d3cb8e9",
+  "https://solana-rpc.publicnode.com",          // Allnodes — no key, good CORS
+  "https://solana.api.onfinality.io/public",    // OnFinality — no key
+  "https://solana.rpc.subquery.network/public", // SubQuery — no key
+  "https://solana.drpc.org",                    // dRPC — fallback
+  "https://solana-mainnet.gateway.tatum.io/",   // Tatum — fallback
 ];
 const TRON    = "https://api.trongrid.io";
 const TON_API = "https://toncenter.com/api/v2";
@@ -357,7 +358,10 @@ async function solPost(body) {
       const r = await fetch(rpc, {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
       const d = await r.json();
       // Skip if forbidden or error
-      if (d?.error?.code === 403 || d?.error?.message?.toLowerCase().includes("forbidden")) continue;
+      if (d?.error?.code === 403 || d?.error?.code === 401 || 
+          d?.error?.message?.toLowerCase().includes("forbidden") ||
+          d?.error?.message?.toLowerCase().includes("unauthorized") ||
+          d?.error?.message?.toLowerCase().includes("access")) continue;
       if (d?.error) { console.warn("SOL RPC error on", rpc, d.error.message); continue; }
       return d;
     } catch(e) { console.warn("SOL RPC failed:", rpc, e.message); }

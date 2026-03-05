@@ -247,7 +247,13 @@ const TEAMS = {
 
 // ── ENDPOINTS ─────────────────────────────────────────────────────────────────
 const ANKR    = "https://rpc.ankr.com/multichain/08e12b8200893486cd2fc46d238429d1056f7a9d85676c2332a92652fe1f698a";
-const SOL_RPC = "https://api.mainnet-beta.solana.com";
+// Solana public RPCs — tried in order until one works
+const SOL_RPCS = [
+  "https://solana-mainnet.g.alchemy.com/v2/demo",
+  "https://rpc.ankr.com/solana",
+  "https://solana.drpc.org",
+  "https://mainnet.helius-rpc.com/?api-key=15319bf1-7164-4b6e-8a5c-5f9b9d3cb8e9",
+];
 const TRON    = "https://api.trongrid.io";
 const TON_API = "https://toncenter.com/api/v2";
 const RONIN   = "https://api.roninchain.com/rpc";
@@ -345,14 +351,30 @@ async function fetchEVM(wallet,team,prices) {
   return rows;
 }
 
+async function solPost(body) {
+  for (const rpc of SOL_RPCS) {
+    try {
+      const r = await fetch(rpc, {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+      const d = await r.json();
+      // Skip if forbidden or error
+      if (d?.error?.code === 403 || d?.error?.message?.toLowerCase().includes("forbidden")) continue;
+      if (d?.error) { console.warn("SOL RPC error on", rpc, d.error.message); continue; }
+      return d;
+    } catch(e) { console.warn("SOL RPC failed:", rpc, e.message); }
+  }
+  return null;
+}
+
 async function fetchSolana(wallet,team,prices) {
   const rows=[];
   try {
-    const sol=(await post(SOL_RPC,{jsonrpc:"2.0",method:"getBalance",params:[wallet],id:1})).result?.value/1e9||0;
+    const r1 = await solPost({jsonrpc:"2.0",method:"getBalance",params:[wallet],id:1});
+    const sol = (r1?.result?.value||0)/1e9;
     if(sol>0) rows.push({team,network:"Solana",wallet,token:"SOL",balance:sol,usd:sol*(prices.SOL||0)});
-    const accs=(await post(SOL_RPC,{jsonrpc:"2.0",method:"getTokenAccountsByOwner",
-      params:[wallet,{programId:"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"},{encoding:"jsonParsed"}],id:1})).result?.value||[];
-    for (const a of accs) {
+
+    const r2 = await solPost({jsonrpc:"2.0",method:"getTokenAccountsByOwner",
+      params:[wallet,{programId:"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"},{encoding:"jsonParsed"}],id:1});
+    for (const a of r2?.result?.value||[]) {
       const info=a.account.data.parsed.info, amt=parseFloat(info.tokenAmount.uiAmount||0), sym=SOL_MINTS[info.mint];
       if(sym&&amt>0) rows.push({team,network:"Solana",wallet,token:sym,balance:amt,usd:amt});
     }
@@ -412,7 +434,11 @@ async function fetchTon(wallet,team,prices) {
     if(ton>0) rows.push({team,network:"TON",wallet,token:"TON",balance:ton,usd:ton*(prices.TON||0)});
     for(const[m,[sym,dec]] of Object.entries(TON_JETTONS)) {
       try {
-        const bal=parseFloat((await(await fetch(`https://tonapi.io/v2/accounts/${wallet}/jettons/${m}`)).json()).balance||0)/10**dec;
+        const r2 = await fetch(`https://tonapi.io/v2/accounts/${wallet}/jettons/${m}`);
+        if (!r2.ok) continue; // 404 = wallet has no such jetton, skip silently
+        const d2 = await r2.json();
+        if (d2.error) continue;
+        const bal=parseFloat(d2.balance||0)/10**dec;
         if(bal>0) rows.push({team,network:"TON",wallet,token:sym,balance:bal,usd:bal});
       } catch{}
     }

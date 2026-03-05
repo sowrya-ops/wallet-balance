@@ -76,6 +76,7 @@
     .team-tab:hover { border-color: var(--accent); color: var(--text); }
     .team-tab.active { background: var(--accent); border-color: var(--accent); color: #080b10; }
     .team-tab[data-team="ALL"].active { background: var(--accent2); border-color: var(--accent2); color: #fff; }
+    .team-tab[data-team="OFFRAMP"].active { background: #a855f7; border-color: #a855f7; color: #fff; }
 
     /* ── Stats row ── */
     .stats-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; margin-bottom: 32px; }
@@ -89,6 +90,7 @@
     .stat-card.inr::before { background: linear-gradient(90deg, #f59e0b, #ef4444); }
     .stat-card.php::before { background: linear-gradient(90deg, #3b82f6, #06b6d4); }
     .stat-card.idr::before { background: linear-gradient(90deg, #10b981, #84cc16); }
+    .stat-card.offramp::before { background: linear-gradient(90deg, #a855f7, #c084fc); }
     .stat-label { font-size: 10px; font-weight: 700; letter-spacing: 0.2em; text-transform: uppercase; color: var(--muted); margin-bottom: 8px; }
     .stat-value { font-family: 'Space Mono', monospace; font-size: 22px; font-weight: 700; color: var(--text); }
     .stat-sub   { font-size: 11px; color: var(--muted); margin-top: 4px; }
@@ -148,6 +150,7 @@
     .team-badge.INR { background: rgba(245,158,11,0.15); color: #f59e0b; }
     .team-badge.PHP { background: rgba(59,130,246,0.15); color: #60a5fa; }
     .team-badge.IDR { background: rgba(16,185,129,0.15); color: #34d399; }
+    .team-badge.OFFRAMP { background: rgba(168,85,247,0.15); color: #c084fc; }
 
     .token-badge { display: inline-flex; align-items: center; gap: 6px; font-weight: 700; }
     .token-icon { width: 22px; height: 22px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 9px; font-weight: 800; flex-shrink: 0; }
@@ -189,6 +192,7 @@
     <button class="team-tab" data-team="INR" onclick="setTeam('INR')">🇮🇳 INR</button>
     <button class="team-tab" data-team="PHP" onclick="setTeam('PHP')">🇵🇭 PHP</button>
     <button class="team-tab" data-team="IDR" onclick="setTeam('IDR')">🇮🇩 IDR</button>
+    <button class="team-tab" data-team="OFFRAMP" onclick="setTeam('OFFRAMP')">⚡ Offramp Assets</button>
   </div>
 
   <div class="stats-row" id="statsRow"></div>
@@ -243,6 +247,11 @@ const TEAMS = {
     ronin:  "0x8637794A77Bf1Ccb084cd469D1fB846aF2428D36",
     aptos:  null,
   },
+  OFFRAMP: {
+    polygon:"0x446f4285d1a04af1A5f6092b22829326e7Ccd6D7",
+    bsc:null, eth:null, arb:null, base:null,
+    solana:null, tron:null, ton:null, ronin:null, aptos:null,
+  },
 };
 
 // ── ENDPOINTS ─────────────────────────────────────────────────────────────────
@@ -282,7 +291,7 @@ const APTOS_RPCS = [
 ];
 
 // ── TOKEN CONTRACTS ───────────────────────────────────────────────────────────
-const EVM_TOKENS = new Set(["USDT","USDC","ETH","WETH","BNB","POL","MATIC"]);
+const EVM_TOKENS = new Set(["USDT","USDC","ETH","BNB","POL","MATIC"]); // no WETH
 const SOL_MINTS  = {
   "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v":"USDC",
   "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB":"USDT",
@@ -376,9 +385,11 @@ async function fetchEVM(wallet,team,prices) {
       const balance=parseFloat(a.balance||0), sym=(a.tokenSymbol||"").toUpperCase();
       let usd=parseFloat(a.balanceUsd||0);
       const net=a.blockchain?a.blockchain[0].toUpperCase()+a.blockchain.slice(1):"";
+      const isNative = (a.tokenType||"").toUpperCase() === "NATIVE";
       if (!usd&&balance&&prices[sym]) usd=balance*prices[sym];
-      // Exclude ETH token from Ethereum and Arbitrum chains entirely
-      if (sym === "ETH") continue;
+      // On Ethereum and Arbitrum: keep native ETH only, skip WETH (wrapped)
+      if (sym === "WETH") continue;
+      if (sym === "ETH" && !isNative) continue; // skip any non-native ETH tokens
       if (balance>0&&EVM_TOKENS.has(sym)) rows.push({team,network:net,wallet,token:sym,balance,usd});
     }
   } catch(e){console.error("EVM",e);}
@@ -711,8 +722,12 @@ async function fetchAll(prices) {
     for(const k of ["bsc","polygon","eth","arb","base"]) {
       if(w[k]&&!evmSeen.has(w[k].toLowerCase())) {
         evmSeen.add(w[k].toLowerCase());
-        const rows = await fetchEVM(w[k],team,prices);
-        all.push(...rows);
+        const evmRows = await fetchEVM(w[k],team,prices);
+        // OFFRAMP team: only show Polygon USDC
+        const filtered = (team === "OFFRAMP")
+          ? evmRows.filter(r => r.network === "Polygon" && r.token === "USDC")
+          : evmRows;
+        all.push(...filtered);
         await sleep(400); // stagger Ankr calls
       }
     }
@@ -767,7 +782,7 @@ const visible = () => {
 
 // ── RENDER ────────────────────────────────────────────────────────────────────
 function renderStats() {
-  const totals={INR:0,PHP:0,IDR:0};
+  const totals={INR:0,PHP:0,IDR:0,OFFRAMP:0};
   for(const r of allRows) totals[r.team]+=r.usd;
   const grand=Object.values(totals).reduce((a,b)=>a+b,0);
   document.getElementById("statsRow").innerHTML=`
@@ -778,7 +793,7 @@ function renderStats() {
     </div>
     ${Object.entries(totals).map(([t,v])=>`
     <div class="stat-card ${t.toLowerCase()}">
-      <div class="stat-label">${t} Wallets</div>
+      <div class="stat-label">${t==="OFFRAMP"?"Offramp Assets":t+" Wallets"}</div>
       <div class="stat-value">$${fmt(v)}</div>
       <div class="stat-sub">${grand>0?((v/grand)*100).toFixed(1):"0.0"}% of portfolio</div>
     </div>`).join("")}`;

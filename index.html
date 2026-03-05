@@ -173,8 +173,8 @@
 
   <header>
     <div class="logo">
-      <div class="logo-title">Multi-Chain · Multi-Team</div>
-      <div class="logo-name">Portfolio<span>.</span></div>
+      <div class="logo-name">Onmeta</div>
+      <div class="logo-title" style="font-size:18px;letter-spacing:0.05em;margin-top:4px;">Asset Portfolio</div>
     </div>
     <div class="header-right">
       <div class="last-updated" id="lastUpdated">—</div>
@@ -185,7 +185,7 @@
   </header>
 
   <div class="team-tabs">
-    <button class="team-tab active" data-team="ALL" onclick="setTeam('ALL')">All Teams</button>
+    <button class="team-tab active" data-team="ALL" onclick="setTeam('ALL')">All Currencies</button>
     <button class="team-tab" data-team="INR" onclick="setTeam('INR')">🇮🇳 INR</button>
     <button class="team-tab" data-team="PHP" onclick="setTeam('PHP')">🇵🇭 PHP</button>
     <button class="team-tab" data-team="IDR" onclick="setTeam('IDR')">🇮🇩 IDR</button>
@@ -521,13 +521,16 @@ async function fetchTon(wallet,team,prices) {
           const sym = (j.jetton?.symbol||"").toUpperCase();
           if (sym !== "USDT" && sym !== "USDC") continue;
 
-          // Use decimals from the API — do NOT hardcode 6
-          const dec = parseInt(j.jetton?.decimals ?? 6);
+          // TON USDT uses 9 decimals, USDC uses 6 — hardcode correct values,
+          // fall back to API decimals only if not a known token
+          const KNOWN_TON_DECIMALS = { "USDT": 9, "USDC": 6 };
+          const apiDec = parseInt(j.jetton?.decimals ?? 9);
+          const dec = KNOWN_TON_DECIMALS[sym] ?? apiDec;
           const raw = j.balance || "0";
 
           // tonapi returns balance as string of raw units
           const bal = parseInt(raw) / 10**dec;
-          console.log(`TON ${sym}: raw=${raw} decimals=${dec} bal=${bal} wallet=${wallet.slice(0,12)}`);
+          console.log(`TON ${sym}: raw=${raw} apiDecimals=${apiDec} usedDecimals=${dec} bal=${bal} wallet=${wallet.slice(0,12)}`);
           if (bal > 0) rows.push({team, network:"TON", wallet, token:sym, balance:bal, usd:bal});
         }
       }

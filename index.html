@@ -322,14 +322,18 @@ async function post(url, body) {
 }
 async function evmCall(rpc,w,c,dec) {
   try {
-    const d = "0x70a08231"+"000000000000000000000000"+w.slice(2);
+    const d = "0x70a08231"+"000000000000000000000000"+w.slice(2).toLowerCase();
     const r = await post(rpc,{jsonrpc:"2.0",method:"eth_call",params:[{to:c,data:d},"latest"],id:1});
-    return parseInt(r.result||"0x0",16)/10**dec;
-  } catch { return 0; }
+    if (r?.error) { console.warn("evmCall error:", r.error.message, c); return 0; }
+    const raw = r?.result || "0x0";
+    if (!raw || raw === "0x" || raw.replace(/0x0*/,"") === "") return 0;
+    return parseInt(raw,16)/10**dec;
+  } catch(e) { console.warn("evmCall failed:", e.message); return 0; }
 }
 async function evmNat(rpc,w) {
   try {
     const r = await post(rpc,{jsonrpc:"2.0",method:"eth_getBalance",params:[w,"latest"],id:1});
+    if (r?.error) return 0;
     return parseInt(r.result||"0x0",16)/1e18;
   } catch { return 0; }
 }
@@ -459,43 +463,72 @@ async function tronFetchWithRetry(url, opts={}, retries=3, delayMs=6000) {
 async function fetchTron(wallet,team,prices) {
   const rows=[];
   try {
-    await sleep(300); // small stagger to avoid hammering
+    await sleep(300);
+    // Fetch account — includes TRX balance AND trc20 token balances in one call
     const acct = await tronFetchWithRetry(`${TRON}/v1/accounts/${wallet}`);
-    const trx=parseFloat(acct?.data?.[0]?.balance||0)/1e6;
-    if(trx>0) rows.push({team,network:"Tron",wallet,token:"TRX",balance:trx,usd:trx*(prices.TRX||0)});
-    for(const[c,[sym,dec]] of Object.entries(TRON_TOKENS)) {
-      try {
-        await sleep(500); // wait between each contract call
-        const r = await tronFetchWithRetry(`${TRON}/wallet/triggerconstantcontract`,{
-          method:"POST", headers:{"Content-Type":"application/json"},
-          body:JSON.stringify({contract_address:c,function_selector:"balanceOf(address)",
-            parameter:wallet.padStart(64,"0"),owner_address:wallet,visible:true})});
-        if (r) {
-          const bal=parseInt(r.constant_result?.[0]||"0",16)/10**dec;
-          if(bal>0) rows.push({team,network:"Tron",wallet,token:sym,balance:bal,usd:bal});
-        }
-      } catch{}
+    const data  = acct?.data?.[0];
+    if (!data) return rows;
+
+    // Native TRX
+    const trx = parseFloat(data.balance||0)/1e6;
+    if (trx>0) rows.push({team,network:"Tron",wallet,token:"TRX",balance:trx,usd:trx*(prices.TRX||0)});
+
+    // TRC-20 tokens are returned in data.trc20 as array of {contractAddress: balance} objects
+    const trc20List = data.trc20 || [];
+    // Build reverse lookup: contract → [symbol, decimals]
+    const CONTRACT_MAP = {};
+    for (const [c,[sym,dec]] of Object.entries(TRON_TOKENS)) CONTRACT_MAP[c] = [sym,dec];
+
+    for (const tokenObj of trc20List) {
+      for (const [contractAddr, rawBal] of Object.entries(tokenObj)) {
+        const entry = CONTRACT_MAP[contractAddr];
+        if (!entry) continue;
+        const [sym, dec] = entry;
+        const bal = parseInt(rawBal||"0") / 10**dec;
+        if (bal>0) rows.push({team,network:"Tron",wallet,token:sym,balance:bal,usd:bal});
+      }
     }
-  } catch(e){console.error("TRON",e);}
+  } catch(e){console.error("TRON",wallet.slice(0,8),e);}
   return rows;
 }
 
 async function fetchTon(wallet,team,prices) {
   const rows=[];
   try {
-    const ton=parseFloat((await(await fetch(`${TON_API}/getAddressBalance?address=${encodeURIComponent(wallet)}`)).json()).result||0)/1e9;
-    if(ton>0) rows.push({team,network:"TON",wallet,token:"TON",balance:ton,usd:ton*(prices.TON||0)});
-    for(const[m,[sym,dec]] of Object.entries(TON_JETTONS)) {
-      try {
-        const r2 = await fetch(`https://tonapi.io/v2/accounts/${wallet}/jettons/${m}`);
-        if (!r2.ok) continue; // 404 = wallet has no such jetton, skip silently
-        const d2 = await r2.json();
-        if (d2.error) continue;
-        const bal=parseFloat(d2.balance||0)/10**dec;
-        if(bal>0) rows.push({team,network:"TON",wallet,token:sym,balance:bal,usd:bal});
-      } catch{}
+    // Native TON balance
+    const balRes = await fetch(`${TON_API}/getAddressBalance?address=${encodeURIComponent(wallet)}`);
+    if (balRes.ok) {
+      const ton = parseFloat((await balRes.json()).result||0)/1e9;
+      if (ton>0) rows.push({team,network:"TON",wallet,token:"TON",balance:ton,usd:ton*(prices.TON||0)});
     }
-  } catch(e){console.error("TON",e);}
+
+    // Jettons — fetch ALL at once from tonapi v2, much more reliable than per-jetton calls
+    try {
+      const jRes = await fetch(`https://tonapi.io/v2/accounts/${encodeURIComponent(wallet)}/jettons?currencies=usd`);
+      if (jRes.ok) {
+        const jData = await jRes.json();
+        // Build lookup: master_address → [sym, dec]
+        const JETTON_MAP = {};
+        for (const [master,[sym,dec]] of Object.entries(TON_JETTONS)) JETTON_MAP[master] = [sym,dec];
+
+        for (const j of jData.balances||[]) {
+          const master = j.jetton?.address || "";
+          // tonapi returns addresses in different formats — check both raw and friendly
+          let entry = JETTON_MAP[master];
+          if (!entry) {
+            // Try matching by symbol name as fallback
+            const name = (j.jetton?.symbol||"").toUpperCase();
+            if (name==="USDT") entry = ["USDT",6];
+            else if (name==="USDC") entry = ["USDC",6];
+          }
+          if (!entry) continue;
+          const [sym,dec] = entry;
+          const bal = parseFloat(j.balance||"0") / 10**dec;
+          if (bal>0) rows.push({team,network:"TON",wallet,token:sym,balance:bal,usd:bal});
+        }
+      }
+    } catch(e){ console.warn("TON jettons failed:", e.message); }
+  } catch(e){console.error("TON",wallet.slice(0,8),e);}
   return rows;
 }
 
@@ -505,10 +538,13 @@ async function fetchRonin(wallet,team,prices) {
     const ron=await evmNat(RONIN,wallet);
     if(ron>0) rows.push({team,network:"Ronin",wallet,token:"RON",balance:ron,usd:ron*(prices.RON||0)});
     for(const[c,[sym,dec]] of Object.entries(RONIN_TOKENS)) {
-      const bal=await evmCall(RONIN,wallet,c,dec);
-      if(bal>0) rows.push({team,network:"Ronin",wallet,token:sym,balance:bal,usd:bal});
+      try {
+        const bal=await evmCall(RONIN,wallet,c,dec);
+        console.log(`Ronin ${sym} bal for ${wallet.slice(0,8)}: ${bal}`);
+        if(bal>0) rows.push({team,network:"Ronin",wallet,token:sym,balance:bal,usd:bal});
+      } catch(e){ console.warn(`Ronin ${sym} error:`, e.message); }
     }
-  } catch(e){console.error("Ronin",e);}
+  } catch(e){console.error("Ronin",wallet.slice(0,8),e);}
   return rows;
 }
 

@@ -291,7 +291,7 @@ const TRON_TOKENS = {
   "TEkxiTehnzSmSe2XqrBj4w32RUN966rdz8": ["USDC",6],
 };
 const TON_JETTONS = {
-  "EQCxE6mUtQJKFnGfaROTKOt1lZbDiiX1kCixRv7Nw2Id_sDs":["USDT",6],
+  "EQCxE6mUtQJKFnGfaROTKOt1lZbDiiX1kCixRv7Nw2Id_sDs":["USDT",9],  // TON USDT = 9 decimals
   "EQB-MPwrd1G6WKNkLz_VnV6WqBDd142KMQv-g1O-8QUA3728":["USDC",6],
 };
 const RONIN_TOKENS = {
@@ -511,25 +511,58 @@ async function fetchTon(wallet,team,prices) {
       if (ton>0) rows.push({team,network:"TON",wallet,token:"TON",balance:ton,usd:ton*(prices.TON||0)});
     }
 
-    // Jettons — fetch ALL at once, use decimals FROM the API response (not hardcoded)
+    // Jettons — TON USDT=9 decimals, TON USDC=6 decimals (hardcoded, never trust API)
+    // Try tonapi.io first, fall back to toncenter per-jetton calls
+    let jettonsFetched = false;
     try {
       const jRes = await fetch(`https://tonapi.io/v2/accounts/${encodeURIComponent(wallet)}/jettons`);
       if (jRes.ok) {
         const jData = await jRes.json();
         for (const j of jData.balances||[]) {
-          // Match by symbol name — most reliable across address format differences
           const sym = (j.jetton?.symbol||"").toUpperCase();
           if (sym !== "USDT" && sym !== "USDC") continue;
-
-          // TON USDT = 9 decimals, TON USDC = 6 decimals — HARDCODED, do not change
-          const dec = (sym === "USDT") ? 9 : 6;
+          const dec = (sym === "USDT") ? 9 : 6;  // HARDCODED — do not use API decimals
           const raw = j.balance || "0";
           const bal = Number(raw) / Math.pow(10, dec);
-          console.log(`TON ${sym}: raw=${raw} dec=${dec} bal=${bal} wallet=${wallet.slice(0,12)}`);
+          console.log(`TON ${sym} [tonapi]: raw=${raw} dec=${dec} bal=${bal}`);
           if (bal > 0) rows.push({team, network:"TON", wallet, token:sym, balance:bal, usd:bal});
+          jettonsFetched = true;
         }
       }
-    } catch(e){ console.warn("TON jettons failed:", e.message); }
+    } catch(e){ console.warn("TON tonapi failed:", e.message); }
+
+    // Fallback: toncenter per-jetton balance calls
+    if (!jettonsFetched) {
+      for (const [jettonAddr, [sym, dec]] of Object.entries(TON_JETTONS)) {
+        try {
+          const r = await fetch(`${TON_API}/getTokenData?address=${encodeURIComponent(jettonAddr)}`);
+          // Use wallet-specific balance via runGetMethod
+          const r2 = await fetch(`${TON_API}/runGetMethod`, {
+            method:"POST", headers:{"Content-Type":"application/json"},
+            body: JSON.stringify({address: jettonAddr, method:"get_wallet_address", stack:[["tvm.Slice", wallet]]})
+          });
+          if (r2.ok) {
+            const d2 = await r2.json();
+            const jwAddr = d2?.result?.stack?.[0]?.[1]?.object?.data?.b64;
+            if (jwAddr) {
+              const r3 = await fetch(`${TON_API}/runGetMethod`, {
+                method:"POST", headers:{"Content-Type":"application/json"},
+                body: JSON.stringify({address: jwAddr, method:"get_wallet_data", stack:[]})
+              });
+              if (r3.ok) {
+                const d3 = await r3.json();
+                const rawBal = d3?.result?.stack?.[0]?.[1];
+                if (rawBal) {
+                  const bal = parseInt(rawBal, 16) / Math.pow(10, dec);
+                  console.log(`TON ${sym} [toncenter fallback]: bal=${bal} dec=${dec}`);
+                  if (bal > 0) rows.push({team, network:"TON", wallet, token:sym, balance:bal, usd:bal});
+                }
+              }
+            }
+          }
+        } catch(e){ console.warn(`TON ${sym} fallback error:`, e.message); }
+      }
+    }
   } catch(e){console.error("TON",wallet.slice(0,8),e);}
   return rows;
 }

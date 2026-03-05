@@ -1057,41 +1057,12 @@ const visible = () => {
 };
 
 // ── RENDER ────────────────────────────────────────────────────────────────────
-function renderStats() {
-  if(!allRows.length) return; // keep skeleton until we have data
-  const totals={INR:0,PHP:0,IDR:0,OFFRAMP:0};
-  for(const r of allRows) totals[r.team]+=r.usd;
-  const grand=Object.values(totals).reduce((a,b)=>a+b,0);
-  document.getElementById("statsRow").innerHTML=`
-    <div class="stat-card">
-      <div class="stat-label">Total Portfolio</div>
-      <div class="stat-value">$${fmt(grand)}</div>
-      <div class="stat-sub">All teams · All chains</div>
-    </div>
-    ${Object.entries(totals).map(([t,v])=>`
-    <div class="stat-card ${t.toLowerCase()}">
-      <div class="stat-label">${t==="OFFRAMP"?"Offramp Assets":t+" Wallets"}</div>
-      <div class="stat-value">$${fmt(v)}</div>
-      <div class="stat-sub">${grand>0?((v/grand)*100).toFixed(1):"0.0"}% of portfolio</div>
-    </div>`).join("")}`;
-}
+function renderStats() { updateStats(); }
 
-function renderNetworkCards() {
-  if(!allRows.length) return; // keep skeleton until we have data
-  const src=activeTeam==="ALL"?allRows:allRows.filter(r=>r.team===activeTeam);
-  const nets={};
-  for(const r of src) nets[r.network]=(nets[r.network]||0)+r.usd;
-  const grand=Object.values(nets).reduce((a,b)=>a+b,0);
-  document.getElementById("networkGrid").innerHTML=Object.entries(nets).sort((a,b)=>b[1]-a[1]).map(([n,v])=>`
-    <div class="net-card">
-      <div class="net-card-top"><span class="net-dot" style="background:${NET_CLR[n]||"#556070"}"></span><span class="net-name">${n}</span></div>
-      <div class="net-value">$${fmt(v)}</div>
-      <div class="net-pct">${grand>0?((v/grand)*100).toFixed(1):"0.0"}% of view</div>
-    </div>`).join("");
-}
+function renderNetworkCards() { updateNetworkCards(); }
 
 function renderTable() {
-  if(!allRows.length) return; // keep skeleton until we have data
+  if(!allRows.length) return; // keep skeleton table until first data arrives
   const src=activeTeam==="ALL"?allRows:allRows.filter(r=>r.team===activeTeam);
   const chains=["All",...new Set(src.map(r=>r.network))];
   document.getElementById("chainTabs").innerHTML=chains.map(c=>
@@ -1126,33 +1097,95 @@ function setChain(chain) {
   renderTable();
 }
 
-// ── SKELETON ──────────────────────────────────────────────────────────────────
-function renderSkeletonStats() {
-  document.getElementById("statsRow").innerHTML = Array(5).fill(0).map(()=>`
-    <div class="stat-card">
-      <div class="skel skel-line" style="width:60%;height:10px;margin-bottom:12px"></div>
-      <div class="skel skel-line" style="width:80%;height:24px;margin-bottom:8px"></div>
-      <div class="skel skel-line" style="width:50%;height:9px"></div>
+// ── ALL KNOWN NETWORKS / CHAINS ───────────────────────────────────────────────
+const ALL_NETWORKS = [
+  { key:"bsc",     label:"Bsc"      },
+  { key:"polygon", label:"Polygon"  },
+  { key:"eth",     label:"Ethereum" },
+  { key:"arb",     label:"Arbitrum" },
+  { key:"base",    label:"Base"     },
+  { key:"solana",  label:"Solana"   },
+  { key:"tron",    label:"Tron"     },
+  { key:"ton",     label:"TON"      },
+  { key:"ronin",   label:"Ronin"    },
+  { key:"aptos",   label:"Aptos"    },
+];
+// Which networks are still loading (set cleared as each finishes)
+let loadingNetworks = new Set();
+
+// ── SKELETON / INITIAL RENDER ─────────────────────────────────────────────────
+function renderInitialStats() {
+  const teams = ["INR","PHP","IDR","OFFRAMP"];
+  document.getElementById("statsRow").innerHTML = `
+    <div class="stat-card" id="sc-TOTAL">
+      <div class="stat-label">Total Portfolio</div>
+      <div class="stat-value" id="sv-TOTAL"><span class="skel skel-line" style="width:100px;height:22px;display:inline-block"></span></div>
+      <div class="stat-sub">All teams · All chains</div>
+    </div>
+    ${teams.map(t=>`
+    <div class="stat-card ${t.toLowerCase()}" id="sc-${t}">
+      <div class="stat-label">${t==="OFFRAMP"?"Offramp Assets":t+" Wallets"}</div>
+      <div class="stat-value" id="sv-${t}"><span class="skel skel-line" style="width:80px;height:22px;display:inline-block"></span></div>
+      <div class="stat-sub" id="ss-${t}">Loading…</div>
+    </div>`).join("")}`;
+}
+
+function updateStats() {
+  const totals={INR:0,PHP:0,IDR:0,OFFRAMP:0};
+  for(const r of allRows) totals[r.team]+=r.usd;
+  const grand=Object.values(totals).reduce((a,b)=>a+b,0);
+  const el = id => document.getElementById(id);
+  if(el("sv-TOTAL")) el("sv-TOTAL").textContent = "$"+fmt(grand);
+  for(const [t,v] of Object.entries(totals)){
+    if(el("sv-"+t)) el("sv-"+t).textContent = "$"+fmt(v);
+    if(el("ss-"+t)) el("ss-"+t).textContent = grand>0?((v/grand)*100).toFixed(1)+"% of portfolio":"0.0% of portfolio";
+  }
+}
+
+function renderInitialNetworkCards() {
+  // Show all known networks immediately — all in loading state
+  document.getElementById("networkGrid").innerHTML = ALL_NETWORKS.map(({key,label})=>`
+    <div class="net-card" id="nc-${key}">
+      <div class="net-card-top">
+        <span class="net-dot" style="background:${NET_CLR[label]||"#556070"}"></span>
+        <span class="net-name">${label}</span>
+        <span class="net-loading-dot" id="nld-${key}" style="margin-left:auto;width:6px;height:6px;border-radius:50%;border:1.5px solid ${NET_CLR[label]||"#556070"};border-top-color:transparent;animation:spin 0.8s linear infinite;display:inline-block;flex-shrink:0"></span>
+      </div>
+      <div class="net-value" id="nv-${key}" style="color:var(--muted)">—</div>
+      <div class="net-pct"  id="np-${key}">Loading…</div>
     </div>`).join("");
 }
 
-function renderSkeletonNetworkCards() {
-  document.getElementById("networkGrid").innerHTML = Array(8).fill(0).map(()=>`
-    <div class="net-card">
-      <div class="net-card-top">
-        <div class="skel" style="width:7px;height:7px;border-radius:50%"></div>
-        <div class="skel skel-line" style="width:60%;height:9px"></div>
-      </div>
-      <div class="skel skel-line" style="width:70%;height:18px;margin-top:8px"></div>
-      <div class="skel skel-line" style="width:45%;height:8px;margin-top:6px"></div>
-    </div>`).join("");
+function updateNetworkCards() {
+  const src = activeTeam==="ALL" ? allRows : allRows.filter(r=>r.team===activeTeam);
+  const nets = {};
+  for(const r of src) nets[r.network]=(nets[r.network]||0)+r.usd;
+  const grand = Object.values(nets).reduce((a,b)=>a+b,0);
+
+  for(const {key, label} of ALL_NETWORKS){
+    const v = nets[label] || 0;
+    const nvEl = document.getElementById("nv-"+key);
+    const npEl = document.getElementById("np-"+key);
+    const nldEl = document.getElementById("nld-"+key);
+    if(!nvEl) continue;
+    if(v > 0){
+      nvEl.textContent = "$"+fmt(v);
+      nvEl.style.color = "var(--text)";
+      npEl.textContent = grand>0?((v/grand)*100).toFixed(1)+"% of view":"—";
+    }
+    // Stop spinner if this network is done loading
+    if(nldEl && !loadingNetworks.has(key)){
+      nldEl.style.display = "none";
+      if(v === 0) { nvEl.textContent = "$0.00"; npEl.textContent = "No balance"; }
+    }
+  }
 }
 
 function renderSkeletonTable() {
   document.getElementById("tableContainer").innerHTML = `
     <table>
       <thead><tr><th>Team</th><th>Network</th><th>Wallet</th><th>Token</th><th>Balance</th><th>USD Value</th></tr></thead>
-      <tbody>${Array(10).fill(0).map((_,i)=>`
+      <tbody>${Array(8).fill(0).map((_,i)=>`
         <tr style="animation-delay:${i*40}ms">
           <td><div class="skel skel-line" style="width:52px;height:18px;border-radius:5px"></div></td>
           <td><div class="skel skel-line" style="width:80px;height:18px;border-radius:6px"></div></td>
@@ -1166,11 +1199,17 @@ function renderSkeletonTable() {
 }
 
 // ── STREAMING LOAD ────────────────────────────────────────────────────────────
-function pushRows(newRows) {
+function pushRows(newRows, doneKeys=[]) {
   allRows.push(...newRows);
-  renderStats();
-  renderNetworkCards();
+  for(const k of doneKeys) loadingNetworks.delete(k);
+  updateStats();
+  updateNetworkCards();
   renderTable();
+}
+
+function markDone(keys=[]) {
+  for(const k of keys) loadingNetworks.delete(k);
+  updateNetworkCards();
 }
 
 async function loadData() {
@@ -1179,20 +1218,24 @@ async function loadData() {
   document.getElementById("errorBox").style.display="none";
   allRows = [];
 
-  // Show skeletons immediately
-  renderSkeletonStats();
-  renderSkeletonNetworkCards();
+  // Mark all networks as loading
+  loadingNetworks = new Set(ALL_NETWORKS.map(n=>n.key));
+
+  // Show all cards + skeleton table immediately
+  renderInitialStats();
+  renderInitialNetworkCards();
   renderSkeletonTable();
   setStatus("Fetching prices…");
 
   try {
     const prices = await getPrices();
 
-    // ── EVM (sequential with stagger, push each wallet as it arrives) ──
+    // ── EVM — push each wallet as it arrives, mark network done ──
     setStatus("Fetching EVM chains…");
+    const evmKeys = ["bsc","polygon","eth","arb","base"];
     for (const [team, w] of Object.entries(TEAMS)) {
       const evmSeen = new Set();
-      for (const k of ["bsc","polygon","eth","arb","base"]) {
+      for (const k of evmKeys) {
         if (w[k] && !evmSeen.has(w[k].toLowerCase())) {
           evmSeen.add(w[k].toLowerCase());
           try {
@@ -1200,12 +1243,14 @@ async function loadData() {
             const filtered = (team === "OFFRAMP")
               ? evmRows.filter(r => r.network === "Polygon" && r.token === "USDC")
               : evmRows;
-            if (filtered.length) pushRows(filtered);
+            pushRows(filtered, []);
           } catch {}
           await sleep(400);
         }
       }
     }
+    // Mark all EVM networks done after loop
+    markDone(evmKeys);
 
     // ── Solana — each wallet pushes as it finishes ──
     setStatus("Fetching Solana…");
@@ -1213,10 +1258,11 @@ async function loadData() {
       .filter(([,w]) => w.solana)
       .map(([team,w]) =>
         fetchSolana(w.solana, team, prices)
-          .then(rows => { if (rows.length) pushRows(rows); })
+          .then(rows => { pushRows(rows, []); })
           .catch(() => {})
       );
     await Promise.allSettled(solPromises);
+    markDone(["solana"]);
 
     // ── TRON — sequential, push each as done ──
     setStatus("Fetching TRON…");
@@ -1224,11 +1270,12 @@ async function loadData() {
       if (w.tron) {
         try {
           const rows = await fetchTron(w.tron, team, prices);
-          if (rows.length) pushRows(rows);
+          pushRows(rows, []);
         } catch {}
         await sleep(1500);
       }
     }
+    markDone(["tron"]);
 
     // ── TON — each wallet pushes as it finishes ──
     setStatus("Fetching TON…");
@@ -1236,10 +1283,11 @@ async function loadData() {
       .filter(([,w]) => w.ton)
       .map(([team,w]) =>
         fetchTon(w.ton, team, prices)
-          .then(rows => { if (rows.length) pushRows(rows); })
+          .then(rows => { pushRows(rows, []); })
           .catch(() => {})
       );
     await Promise.allSettled(tonPromises);
+    markDone(["ton"]);
 
     // ── Ronin — each wallet pushes as it finishes ──
     setStatus("Fetching Ronin…");
@@ -1247,10 +1295,11 @@ async function loadData() {
       .filter(([,w]) => w.ronin)
       .map(([team,w]) =>
         fetchRonin(w.ronin, team, prices)
-          .then(rows => { if (rows.length) pushRows(rows); })
+          .then(rows => { pushRows(rows, []); })
           .catch(() => {})
       );
     await Promise.allSettled(roninPromises);
+    markDone(["ronin"]);
 
     // ── Aptos — each wallet pushes as it finishes ──
     setStatus("Fetching Aptos…");
@@ -1258,19 +1307,22 @@ async function loadData() {
       .filter(([,w]) => w.aptos)
       .map(([team,w]) =>
         fetchAptos(w.aptos, team, prices)
-          .then(rows => { if (rows.length) pushRows(rows); })
+          .then(rows => { pushRows(rows, []); })
           .catch(() => {})
       );
     await Promise.allSettled(aptosPromises);
+    markDone(["aptos"]);
 
     document.getElementById("lastUpdated").textContent = "Updated " + new Date().toLocaleTimeString();
   } catch(e) {
     document.getElementById("errorBox").style.display = "block";
     document.getElementById("errorBox").textContent = "Error: " + e.message;
+    loadingNetworks.clear();
+    updateNetworkCards();
   } finally {
     btn.classList.remove("loading"); icon.classList.remove("spin"); icon.textContent = "↻";
-    // Final clean render in case last push didn't clear skeletons
-    renderStats(); renderNetworkCards(); renderTable();
+    loadingNetworks.clear();
+    updateStats(); updateNetworkCards(); renderTable();
   }
 }
 

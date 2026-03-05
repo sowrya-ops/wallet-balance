@@ -274,7 +274,11 @@ const SOL_RPCS = [
 const TRON    = "https://api.trongrid.io";
 const TON_API = "https://toncenter.com/api/v2";
 const RONIN   = "https://api.roninchain.com/rpc";
-const APTOS   = "https://api.mainnet.aptoslabs.com/v1";
+const APTOS_RPCS = [
+  "https://fullnode.mainnet.aptoslabs.com/v1",
+  "https://aptos-mainnet.public.blastapi.io",
+  "https://api.mainnet.aptoslabs.com/v1",
+];
 
 // ── TOKEN CONTRACTS ───────────────────────────────────────────────────────────
 const EVM_TOKENS = new Set(["USDT","USDC","ETH","BNB","POL","MATIC"]);
@@ -297,9 +301,11 @@ const RONIN_TOKENS = {
   // USDT
   "0x96f2842007021a4c5f06bcc72961701d66ff8465":["USDT",6],
 };
-const APTOS_TOKENS = {
-  "0x357b0b74bc833e95a115ad22604854d6b0fca151cecd94111770e5d6ffc9dc2b":["USDT",6],
-  "0xbae207659db88bea0cbead6da0ed00aac12edcdda169e591cd41c94180b46f3b":["USDC",6],
+// Aptos Fungible Asset metadata addresses (used with primary_fungible_store::balance view fn)
+const APTOS_FA_TOKENS = {
+  "0x357b0b74bc833e95a115ad22604854d6b0fca151cecd94111770e5d6ffc9dc2b": ["USDT", 6],  // LayerZero USDT
+  "0xbae207659db88bea0cbead6da0ed00aac12edcdda169e591cd41c94180b46f3b": ["USDC", 6],  // native Circle USDC (Jan 2025)
+  "0xf22bede237a07e121b56d91a491eb7bcdfd1f5907926a9e58338f964a01b17fa": ["USDC", 6],  // lzUSDC (old bridged, still in circulation)
 };
 
 // ── STYLES ────────────────────────────────────────────────────────────────────
@@ -569,21 +575,66 @@ async function fetchRonin(wallet,team,prices) {
   return rows;
 }
 
+async function aptosPost(path, body) {
+  for (const base of APTOS_RPCS) {
+    try {
+      const r = await fetch(base + path, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(body)
+      });
+      if (r.ok) return await r.json();
+    } catch(e) { /* try next */ }
+  }
+  return null;
+}
+
+async function aptosGet(path) {
+  for (const base of APTOS_RPCS) {
+    try {
+      const r = await fetch(base + path);
+      if (r.ok) return await r.json();
+    } catch(e) { /* try next */ }
+  }
+  return null;
+}
+
 async function fetchAptos(wallet,team,prices) {
   const rows=[];
   try {
-    const r=await fetch(`${APTOS}/accounts/${wallet}/balance/0x1::aptos_coin::AptosCoin`);
-    if(r.ok){
-      const apt=parseFloat((await r.json()).amount||0)/1e8;
-      if(apt>0) rows.push({team,network:"Aptos",wallet,token:"APT",balance:apt,usd:apt*(prices.APT||0)});
+    // ── Native APT balance (old coin framework still works for APT) ──
+    const aptData = await aptosGet(`/accounts/${wallet}/balance/0x1::aptos_coin::AptosCoin`);
+    if (aptData?.amount) {
+      const apt = parseFloat(aptData.amount) / 1e8;
+      if (apt > 0) rows.push({team, network:"Aptos", wallet, token:"APT", balance:apt, usd:apt*(prices.APT||0)});
     }
-    for(const[m,[sym,dec]] of Object.entries(APTOS_TOKENS)) {
+
+    // ── USDT / USDC via Fungible Asset view function ──
+    // Aptos USDT & USDC use the FA standard — must call primary_fungible_store::balance
+    const seen = {}; // deduplicate USDC if both old+new have balance
+    for (const [metaAddr, [sym, dec]] of Object.entries(APTOS_FA_TOKENS)) {
       try {
-        const r2=await fetch(`${APTOS}/accounts/${wallet}/balance/${m}`);
-        if(r2.ok){const bal=parseFloat((await r2.json()).amount||0)/10**dec;if(bal>0) rows.push({team,network:"Aptos",wallet,token:sym,balance:bal,usd:bal});}
-      } catch{}
+        const result = await aptosPost("/view", {
+          function: "0x1::primary_fungible_store::balance",
+          type_arguments: ["0x1::fungible_asset::Metadata"],
+          arguments: [wallet, metaAddr]
+        });
+        const raw = result?.[0];
+        if (raw != null) {
+          const bal = parseInt(raw) / 10**dec;
+          console.log(`Aptos ${sym} (${metaAddr.slice(0,10)}): ${bal}`);
+          if (bal > 0) {
+            // accumulate same symbol (e.g. two USDC contracts)
+            seen[sym] = (seen[sym] || 0) + bal;
+          }
+        }
+      } catch(e) { console.warn("Aptos FA view error:", e.message); }
     }
-  } catch(e){console.error("Aptos",e);}
+    for (const [sym, bal] of Object.entries(seen)) {
+      rows.push({team, network:"Aptos", wallet, token:sym, balance:bal, usd:bal});
+    }
+
+  } catch(e){console.error("Aptos", e);}
   return rows;
 }
 

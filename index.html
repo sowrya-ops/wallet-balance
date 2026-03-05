@@ -291,7 +291,10 @@ const TON_JETTONS = {
   "EQB-MPwrd1G6WKNkLz_VnV6WqBDd142KMQv-g1O-8QUA3728":["USDC",6],
 };
 const RONIN_TOKENS = {
-  "0x0b7007c13325c48911f73a2dad5fa5dcbf808adc":["USDC",6],
+  // USDC: old bridged (still has balances) + new CCIP native
+  "0x0b7007c13325c48911f73a2dad5fa5dcbf808adc":["USDC",6],   // old bridge USDC (deprecated but balances exist)
+  "0x176211869ca2b568f2a7d4ee941e073a821ee1ff":["USDC",6],   // new CCIP native USDC on Ronin
+  // USDT
   "0x96f2842007021a4c5f06bcc72961701d66ff8465":["USDT",6],
 };
 const APTOS_TOKENS = {
@@ -502,29 +505,24 @@ async function fetchTon(wallet,team,prices) {
       if (ton>0) rows.push({team,network:"TON",wallet,token:"TON",balance:ton,usd:ton*(prices.TON||0)});
     }
 
-    // Jettons — fetch ALL at once from tonapi v2, much more reliable than per-jetton calls
+    // Jettons — fetch ALL at once, use decimals FROM the API response (not hardcoded)
     try {
-      const jRes = await fetch(`https://tonapi.io/v2/accounts/${encodeURIComponent(wallet)}/jettons?currencies=usd`);
+      const jRes = await fetch(`https://tonapi.io/v2/accounts/${encodeURIComponent(wallet)}/jettons`);
       if (jRes.ok) {
         const jData = await jRes.json();
-        // Build lookup: master_address → [sym, dec]
-        const JETTON_MAP = {};
-        for (const [master,[sym,dec]] of Object.entries(TON_JETTONS)) JETTON_MAP[master] = [sym,dec];
-
         for (const j of jData.balances||[]) {
-          const master = j.jetton?.address || "";
-          // tonapi returns addresses in different formats — check both raw and friendly
-          let entry = JETTON_MAP[master];
-          if (!entry) {
-            // Try matching by symbol name as fallback
-            const name = (j.jetton?.symbol||"").toUpperCase();
-            if (name==="USDT") entry = ["USDT",6];
-            else if (name==="USDC") entry = ["USDC",6];
-          }
-          if (!entry) continue;
-          const [sym,dec] = entry;
-          const bal = parseFloat(j.balance||"0") / 10**dec;
-          if (bal>0) rows.push({team,network:"TON",wallet,token:sym,balance:bal,usd:bal});
+          // Match by symbol name — most reliable across address format differences
+          const sym = (j.jetton?.symbol||"").toUpperCase();
+          if (sym !== "USDT" && sym !== "USDC") continue;
+
+          // Use decimals from the API — do NOT hardcode 6
+          const dec = parseInt(j.jetton?.decimals ?? 6);
+          const raw = j.balance || "0";
+
+          // tonapi returns balance as string of raw units
+          const bal = parseInt(raw) / 10**dec;
+          console.log(`TON ${sym}: raw=${raw} decimals=${dec} bal=${bal} wallet=${wallet.slice(0,12)}`);
+          if (bal > 0) rows.push({team, network:"TON", wallet, token:sym, balance:bal, usd:bal});
         }
       }
     } catch(e){ console.warn("TON jettons failed:", e.message); }
@@ -535,14 +533,37 @@ async function fetchTon(wallet,team,prices) {
 async function fetchRonin(wallet,team,prices) {
   const rows=[];
   try {
-    const ron=await evmNat(RONIN,wallet);
-    if(ron>0) rows.push({team,network:"Ronin",wallet,token:"RON",balance:ron,usd:ron*(prices.RON||0)});
-    for(const[c,[sym,dec]] of Object.entries(RONIN_TOKENS)) {
+    // Native RON balance via RPC
+    const ron = await evmNat(RONIN, wallet);
+    if (ron>0) rows.push({team,network:"Ronin",wallet,token:"RON",balance:ron,usd:ron*(prices.RON||0)});
+
+    // Token balances — use Ronin Explorer API (returns all tokens at once, no contract guessing)
+    try {
+      const addr = wallet.toLowerCase();
+      const res = await fetch(`https://explorer.roninchain.com/api/tokenbalances/${addr}`);
+      if (res.ok) {
+        const data = await res.json();
+        const items = data.results || data.items || data || [];
+        for (const item of items) {
+          const sym = (item.token_symbol || item.symbol || "").toUpperCase();
+          if (sym !== "USDC" && sym !== "USDT") continue;
+          const dec = parseInt(item.token_decimals ?? item.decimals ?? 6);
+          const raw = item.balance || item.value || "0";
+          const bal = parseInt(raw) / 10**dec;
+          console.log(`Ronin ${sym}: raw=${raw} dec=${dec} bal=${bal} wallet=${wallet.slice(0,8)}`);
+          if (bal>0) rows.push({team,network:"Ronin",wallet,token:sym,balance:bal,usd:bal});
+        }
+        return rows; // success — skip RPC fallback
+      }
+    } catch(e) { console.warn("Ronin explorer API failed:", e.message); }
+
+    // Fallback: raw RPC calls for each known contract
+    for (const [c,[sym,dec]] of Object.entries(RONIN_TOKENS)) {
       try {
-        const bal=await evmCall(RONIN,wallet,c,dec);
-        console.log(`Ronin ${sym} bal for ${wallet.slice(0,8)}: ${bal}`);
-        if(bal>0) rows.push({team,network:"Ronin",wallet,token:sym,balance:bal,usd:bal});
-      } catch(e){ console.warn(`Ronin ${sym} error:`, e.message); }
+        const bal = await evmCall(RONIN, wallet, c, dec);
+        console.log(`Ronin RPC ${sym} (${c.slice(0,8)}): ${bal}`);
+        if (bal>0) rows.push({team,network:"Ronin",wallet,token:sym,balance:bal,usd:bal});
+      } catch(e) { console.warn(`Ronin RPC ${sym} error:`, e.message); }
     }
   } catch(e){console.error("Ronin",wallet.slice(0,8),e);}
   return rows;

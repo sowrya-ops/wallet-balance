@@ -280,6 +280,18 @@ const SOL_RPCS = [
   { url: "https://rpc.ankr.com/solana",                headers: {} }, // Ankr public — free
   { url: "https://solana.drpc.org",                    headers: {} }, // dRPC — free
 ];
+const ETH_RPCS = [
+  "https://eth.llamarpc.com",
+  "https://rpc.ankr.com/eth",
+  "https://ethereum.publicnode.com",
+  "https://cloudflare-eth.com",
+];
+const ARB_RPCS = [
+  "https://arb1.arbitrum.io/rpc",
+  "https://rpc.ankr.com/arbitrum",
+  "https://arbitrum.llamarpc.com",
+  "https://arbitrum-one.publicnode.com",
+];
 const TRON    = "https://api.trongrid.io";
 const TON_API = "https://toncenter.com/api/v2";
 const RONIN   = "https://api.roninchain.com/rpc";
@@ -376,8 +388,32 @@ async function getPrices() {
 }
 
 // ── FETCHERS ──────────────────────────────────────────────────────────────────
+// Try each RPC in array until one succeeds
+async function evmNatFirst(rpcs, wallet) {
+  for (const rpc of rpcs) {
+    const bal = await evmNat(rpc, wallet);
+    if (bal > 0) return bal;
+    // Also accept 0 but only if we got a real response (not a failure)
+    try {
+      const r = await post(rpc, {jsonrpc:"2.0",method:"eth_getBalance",params:[wallet,"latest"],id:1});
+      if (r?.result !== undefined && !r?.error) return parseInt(r.result||"0x0",16)/1e18;
+    } catch {}
+  }
+  return 0;
+}
+
 async function fetchEVM(wallet,team,prices) {
   const rows=[];
+
+  // Always fetch native ETH on Ethereum and Arbitrum directly via RPC (don't rely on Ankr for this)
+  const [ethBal, arbBal] = await Promise.all([
+    evmNatFirst(ETH_RPCS, wallet),
+    evmNatFirst(ARB_RPCS, wallet),
+  ]);
+  const ethPrice = prices["ETH"] || 0;
+  if (ethBal > 0) rows.push({team, network:"Ethereum", wallet, token:"ETH", balance:ethBal, usd:ethBal*ethPrice});
+  if (arbBal > 0) rows.push({team, network:"Arbitrum",  wallet, token:"ETH", balance:arbBal, usd:arbBal*ethPrice});
+
   try {
     const res = await post(ANKR,{jsonrpc:"2.0",method:"ankr_getAccountBalance",
       params:{walletAddress:wallet,onlyWhitelisted:false,nativeFirst:true},id:1});
@@ -387,9 +423,10 @@ async function fetchEVM(wallet,team,prices) {
       const net=a.blockchain?a.blockchain[0].toUpperCase()+a.blockchain.slice(1):"";
       const isNative = (a.tokenType||"").toUpperCase() === "NATIVE";
       if (!usd&&balance&&prices[sym]) usd=balance*prices[sym];
-      // On Ethereum and Arbitrum: keep native ETH only, skip WETH (wrapped)
+      // Skip WETH always; skip ETH on Ethereum/Arbitrum (already fetched via direct RPC above)
       if (sym === "WETH") continue;
-      if (sym === "ETH" && !isNative) continue; // skip any non-native ETH tokens
+      if (sym === "ETH" && (net === "Ethereum" || net === "Arbitrum")) continue;
+      if (sym === "ETH" && !isNative) continue;
       if (balance>0&&EVM_TOKENS.has(sym)) rows.push({team,network:net,wallet,token:sym,balance,usd});
     }
   } catch(e){console.error("EVM",e);}

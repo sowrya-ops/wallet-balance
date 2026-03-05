@@ -275,9 +275,10 @@ const TRON    = "https://api.trongrid.io";
 const TON_API = "https://toncenter.com/api/v2";
 const RONIN   = "https://api.roninchain.com/rpc";
 const APTOS_RPCS = [
+  "https://api.mainnet.aptoslabs.com/v1",
   "https://fullnode.mainnet.aptoslabs.com/v1",
   "https://aptos-mainnet.public.blastapi.io",
-  "https://api.mainnet.aptoslabs.com/v1",
+  "https://rpc.ankr.com/aptos",
 ];
 
 // ── TOKEN CONTRACTS ───────────────────────────────────────────────────────────
@@ -291,7 +292,8 @@ const TRON_TOKENS = {
   "TEkxiTehnzSmSe2XqrBj4w32RUN966rdz8": ["USDC",6],
 };
 const TON_JETTONS = {
-  "EQCxE6mUtQJKFnGfaROTKOt1lZbDiiX1kCixRv7Nw2Id_sDs":["USDT",9],  // TON USDT = 9 decimals
+  // Native Tether USD₮ on TON ONLY (official Tether, 9 decimals)
+  "EQCxE6mUtQJKFnGfaROTKOt1lZbDiiX1kCixRv7Nw2Id_sDs":["USD₮",9],
   "EQB-MPwrd1G6WKNkLz_VnV6WqBDd142KMQv-g1O-8QUA3728":["USDC",6],
 };
 const RONIN_TOKENS = {
@@ -511,7 +513,7 @@ async function fetchTon(wallet,team,prices) {
       if (ton>0) rows.push({team,network:"TON",wallet,token:"TON",balance:ton,usd:ton*(prices.TON||0)});
     }
 
-    // Jettons — TON USDT=9 decimals, TON USDC=6 decimals (hardcoded, never trust API)
+    // Jettons — TON USDT=6 decimals, TON USDC=6 decimals (Tether official, hardcoded)
     // Try tonapi.io first, fall back to toncenter per-jetton calls
     let jettonsFetched = false;
     try {
@@ -520,12 +522,14 @@ async function fetchTon(wallet,team,prices) {
         const jData = await jRes.json();
         for (const j of jData.balances||[]) {
           const sym = (j.jetton?.symbol||"").toUpperCase();
-          if (sym !== "USDT" && sym !== "USDC") continue;
-          const dec = (sym === "USDT") ? 9 : 6;  // HARDCODED — do not use API decimals
+          if (sym !== "USD₮" && sym !== "USDC") continue; // only native USD₮, not old wrapped USDT
+          const normSym = (sym === "USD₮") ? "USDT" : sym;
+          // USD₮ (native Tether on TON) = 9 decimals; USDT (old wrapped) = 6 decimals
+          const dec = (sym === "USD₮") ? 9 : 6;
           const raw = j.balance || "0";
           const bal = Number(raw) / Math.pow(10, dec);
           console.log(`TON ${sym} [tonapi]: raw=${raw} dec=${dec} bal=${bal}`);
-          if (bal > 0) rows.push({team, network:"TON", wallet, token:sym, balance:bal, usd:bal});
+          if (bal > 0) rows.push({team, network:"TON", wallet, token:normSym, balance:bal, usd:bal});
           jettonsFetched = true;
         }
       }
@@ -555,7 +559,8 @@ async function fetchTon(wallet,team,prices) {
                 if (rawBal) {
                   const bal = parseInt(rawBal, 16) / Math.pow(10, dec);
                   console.log(`TON ${sym} [toncenter fallback]: bal=${bal} dec=${dec}`);
-                  if (bal > 0) rows.push({team, network:"TON", wallet, token:sym, balance:bal, usd:bal});
+                  const dispSym = (sym === "USD₮") ? "USDT" : sym;
+                  if (bal > 0) rows.push({team, network:"TON", wallet, token:dispSym, balance:bal, usd:bal});
                 }
               }
             }
@@ -633,11 +638,31 @@ async function aptosGet(path) {
 async function fetchAptos(wallet,team,prices) {
   const rows=[];
   try {
-    // ── Native APT balance (old coin framework still works for APT) ──
-    const aptData = await aptosGet(`/accounts/${wallet}/balance/0x1::aptos_coin::AptosCoin`);
-    if (aptData?.amount) {
-      const apt = parseFloat(aptData.amount) / 1e8;
-      if (apt > 0) rows.push({team, network:"Aptos", wallet, token:"APT", balance:apt, usd:apt*(prices.APT||0)});
+    // ── Native APT balance — try FA view first (0xa = APT metadata), fallback to coin API ──
+    let aptFetched = false;
+    try {
+      const aptResult = await aptosPost("/view", {
+        function: "0x1::primary_fungible_store::balance",
+        type_arguments: ["0x1::fungible_asset::Metadata"],
+        arguments: [wallet, "0x000000000000000000000000000000000000000000000000000000000000000a"]
+      });
+      const aptRaw = aptResult?.[0];
+      if (aptRaw != null) {
+        const apt = parseInt(aptRaw) / 1e8;
+        console.log(`Aptos APT [FA view]: raw=${aptRaw} apt=${apt}`);
+        if (apt > 0) rows.push({team, network:"Aptos", wallet, token:"APT", balance:apt, usd:apt*(prices.APT||0)});
+        aptFetched = true;
+      }
+    } catch(e) { console.warn("Aptos APT FA view failed:", e.message); }
+
+    // Fallback: old coin API
+    if (!aptFetched) {
+      const aptData = await aptosGet(`/accounts/${wallet}/balance/0x1::aptos_coin::AptosCoin`);
+      if (aptData?.amount) {
+        const apt = parseFloat(aptData.amount) / 1e8;
+        console.log(`Aptos APT [coin API]: apt=${apt}`);
+        if (apt > 0) rows.push({team, network:"Aptos", wallet, token:"APT", balance:apt, usd:apt*(prices.APT||0)});
+      }
     }
 
     // ── USDT / USDC via Fungible Asset view function ──

@@ -368,50 +368,70 @@ async function fetchEVM(wallet,team,prices) {
   return rows;
 }
 
-async function solPost(body) {
+// Pick a working RPC once and reuse it — avoids method support mismatches across calls
+let _solRpc = null;
+async function getSolRpc() {
+  if (_solRpc) return _solRpc;
   for (const rpc of SOL_RPCS) {
     try {
-      // Each rpc is { url, headers } — merge any auth headers with Content-Type
       const r = await fetch(rpc.url, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...rpc.headers },
-        body: JSON.stringify(body)
+        body: JSON.stringify({jsonrpc:"2.0",method:"getSlot",params:[],id:1})
       });
-      if (!r.ok) { console.warn("SOL HTTP", r.status, rpc.url); continue; }
+      if (!r.ok) continue;
       const d = await r.json();
-      if (d?.error) {
-        const msg = (d.error.message || "").toLowerCase();
-        const code = d.error.code;
-        if (code === 403 || code === 401 || code === 35 || code === -32601 ||
-            msg.includes("forbidden") || msg.includes("unauthorized") ||
-            msg.includes("not available") || msg.includes("not supported") ||
-            msg.includes("access")) {
-          console.warn("SOL RPC skip:", rpc.url, d.error.message);
-          continue;
-        }
-        console.warn("SOL RPC error:", rpc.url, d.error.message);
-        continue;
+      if (d?.result && !d?.error) {
+        console.log("✅ Solana RPC selected:", rpc.url);
+        _solRpc = rpc;
+        return rpc;
       }
-      return d;
-    } catch(e) { console.warn("SOL RPC failed:", rpc.url, e.message); }
+    } catch(e) { console.warn("SOL probe failed:", rpc.url); }
   }
-  return null;
+  return SOL_RPCS[0]; // fallback to first
 }
 
-async function fetchSolana(wallet,team,prices) {
-  const rows=[];
+async function solPost(body) {
+  const rpc = await getSolRpc();
   try {
-    const r1 = await solPost({jsonrpc:"2.0",method:"getBalance",params:[wallet],id:1});
-    const sol = (r1?.result?.value||0)/1e9;
-    if(sol>0) rows.push({team,network:"Solana",wallet,token:"SOL",balance:sol,usd:sol*(prices.SOL||0)});
+    const r = await fetch(rpc.url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...rpc.headers },
+      body: JSON.stringify(body)
+    });
+    if (!r.ok) { console.warn("SOL HTTP", r.status, rpc.url); return null; }
+    const d = await r.json();
+    if (d?.error) { console.warn("SOL error:", d.error.message); return null; }
+    return d;
+  } catch(e) { console.warn("SOL failed:", e.message); return null; }
+}
 
-    const r2 = await solPost({jsonrpc:"2.0",method:"getTokenAccountsByOwner",
-      params:[wallet,{programId:"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"},{encoding:"jsonParsed"}],id:1});
-    for (const a of r2?.result?.value||[]) {
-      const info=a.account.data.parsed.info, amt=parseFloat(info.tokenAmount.uiAmount||0), sym=SOL_MINTS[info.mint];
-      if(sym&&amt>0) rows.push({team,network:"Solana",wallet,token:sym,balance:amt,usd:amt});
+async function fetchSolana(wallet, team, prices) {
+  const rows = [];
+  try {
+    // SOL native balance
+    const r1 = await solPost({jsonrpc:"2.0",method:"getBalance",params:[wallet],id:1});
+    const sol = (r1?.result?.value || 0) / 1e9;
+    if (sol > 0) rows.push({team, network:"Solana", wallet, token:"SOL", balance:sol, usd:sol*(prices.SOL||0)});
+
+    // SPL tokens (USDT, USDC) — getTokenAccountsByOwner
+    const r2 = await solPost({
+      jsonrpc: "2.0", method: "getTokenAccountsByOwner", id: 2,
+      params: [
+        wallet,
+        { programId: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" },
+        { encoding: "jsonParsed" }
+      ]
+    });
+    for (const a of r2?.result?.value || []) {
+      try {
+        const info = a.account.data.parsed.info;
+        const amt  = parseFloat(info.tokenAmount.uiAmount || 0);
+        const sym  = SOL_MINTS[info.mint];
+        if (sym && amt > 0) rows.push({team, network:"Solana", wallet, token:sym, balance:amt, usd:amt});
+      } catch {}
     }
-  } catch(e){console.error("SOL",e);}
+  } catch(e) { console.error("SOL", wallet.slice(0,8), e); }
   return rows;
 }
 

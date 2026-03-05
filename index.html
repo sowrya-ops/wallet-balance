@@ -360,19 +360,45 @@ async function fetchSolana(wallet,team,prices) {
   return rows;
 }
 
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function tronFetchWithRetry(url, opts={}, retries=3, delayMs=6000) {
+  for (let i=0; i<retries; i++) {
+    try {
+      const r = await fetch(url, opts);
+      const d = await r.json();
+      // Check for rate limit error in response body
+      if (d?.Error?.includes?.("rate") || d?.error?.includes?.("rate") || d?.message?.includes?.("forbidden")) {
+        console.warn(`TRON rate limited, waiting ${delayMs}ms...`);
+        await sleep(delayMs);
+        continue;
+      }
+      return d;
+    } catch(e) {
+      if (i < retries-1) await sleep(delayMs);
+    }
+  }
+  return null;
+}
+
 async function fetchTron(wallet,team,prices) {
   const rows=[];
   try {
-    const trx=parseFloat((await(await fetch(`${TRON}/v1/accounts/${wallet}`)).json()).data?.[0]?.balance||0)/1e6;
+    await sleep(300); // small stagger to avoid hammering
+    const acct = await tronFetchWithRetry(`${TRON}/v1/accounts/${wallet}`);
+    const trx=parseFloat(acct?.data?.[0]?.balance||0)/1e6;
     if(trx>0) rows.push({team,network:"Tron",wallet,token:"TRX",balance:trx,usd:trx*(prices.TRX||0)});
     for(const[c,[sym,dec]] of Object.entries(TRON_TOKENS)) {
       try {
-        const r=await(await fetch(`${TRON}/wallet/triggerconstantcontract`,{method:"POST",
-          headers:{"Content-Type":"application/json"},
+        await sleep(500); // wait between each contract call
+        const r = await tronFetchWithRetry(`${TRON}/wallet/triggerconstantcontract`,{
+          method:"POST", headers:{"Content-Type":"application/json"},
           body:JSON.stringify({contract_address:c,function_selector:"balanceOf(address)",
-            parameter:wallet.padStart(64,"0"),owner_address:wallet,visible:true})})).json();
-        const bal=parseInt(r.constant_result?.[0]||"0",16)/10**dec;
-        if(bal>0) rows.push({team,network:"Tron",wallet,token:sym,balance:bal,usd:bal});
+            parameter:wallet.padStart(64,"0"),owner_address:wallet,visible:true})});
+        if (r) {
+          const bal=parseInt(r.constant_result?.[0]||"0",16)/10**dec;
+          if(bal>0) rows.push({team,network:"Tron",wallet,token:sym,balance:bal,usd:bal});
+        }
       } catch{}
     }
   } catch(e){console.error("TRON",e);}
@@ -425,21 +451,62 @@ async function fetchAptos(wallet,team,prices) {
   return rows;
 }
 
+function setStatus(msg) {
+  document.getElementById("tableContainer").innerHTML=
+    `<div class="state-box"><div class="pulse"></div><p>${msg}</p></div>`;
+}
+
 async function fetchAll(prices) {
-  const jobs=[];
+  const all=[];
+
+  // ── Step 1: EVM (Ankr) — sequential per team to respect rate limits ──
+  setStatus("Fetching EVM chains (BSC, ETH, Polygon, Arbitrum, Base)…");
   for(const[team,w] of Object.entries(TEAMS)) {
     const evmSeen=new Set();
     for(const k of ["bsc","polygon","eth","arb","base"]) {
-      if(w[k]&&!evmSeen.has(w[k].toLowerCase())){evmSeen.add(w[k].toLowerCase());jobs.push(fetchEVM(w[k],team,prices));}
+      if(w[k]&&!evmSeen.has(w[k].toLowerCase())) {
+        evmSeen.add(w[k].toLowerCase());
+        const rows = await fetchEVM(w[k],team,prices);
+        all.push(...rows);
+        await sleep(400); // stagger Ankr calls
+      }
     }
-    if(w.solana) jobs.push(fetchSolana(w.solana,team,prices));
-    if(w.tron)   jobs.push(fetchTron(w.tron,team,prices));
-    if(w.ton)    jobs.push(fetchTon(w.ton,team,prices));
-    if(w.ronin)  jobs.push(fetchRonin(w.ronin,team,prices));
-    if(w.aptos)  jobs.push(fetchAptos(w.aptos,team,prices));
   }
-  const all=[];
-  for(const r of await Promise.allSettled(jobs)) if(r.status==="fulfilled") all.push(...r.value);
+
+  // ── Step 2: Solana — parallel, no rate issues ──
+  setStatus("Fetching Solana…");
+  const solJobs=[];
+  for(const[team,w] of Object.entries(TEAMS)) if(w.solana) solJobs.push(fetchSolana(w.solana,team,prices));
+  for(const r of await Promise.allSettled(solJobs)) if(r.status==="fulfilled") all.push(...r.value);
+
+  // ── Step 3: TRON — sequential to avoid rate limit ──
+  setStatus("Fetching TRON (sequential to avoid rate limit)…");
+  for(const[team,w] of Object.entries(TEAMS)) {
+    if(w.tron) {
+      const rows = await fetchTron(w.tron,team,prices);
+      all.push(...rows);
+      await sleep(1500); // wait between each TRON wallet
+    }
+  }
+
+  // ── Step 4: TON — parallel ──
+  setStatus("Fetching TON…");
+  const tonJobs=[];
+  for(const[team,w] of Object.entries(TEAMS)) if(w.ton) tonJobs.push(fetchTon(w.ton,team,prices));
+  for(const r of await Promise.allSettled(tonJobs)) if(r.status==="fulfilled") all.push(...r.value);
+
+  // ── Step 5: Ronin — parallel ──
+  setStatus("Fetching Ronin…");
+  const roninJobs=[];
+  for(const[team,w] of Object.entries(TEAMS)) if(w.ronin) roninJobs.push(fetchRonin(w.ronin,team,prices));
+  for(const r of await Promise.allSettled(roninJobs)) if(r.status==="fulfilled") all.push(...r.value);
+
+  // ── Step 6: Aptos — parallel ──
+  setStatus("Fetching Aptos…");
+  const aptosJobs=[];
+  for(const[team,w] of Object.entries(TEAMS)) if(w.aptos) aptosJobs.push(fetchAptos(w.aptos,team,prices));
+  for(const r of await Promise.allSettled(aptosJobs)) if(r.status==="fulfilled") all.push(...r.value);
+
   return all;
 }
 
@@ -525,7 +592,7 @@ async function loadData() {
   const btn=document.getElementById("refreshBtn"), icon=document.getElementById("refreshIcon");
   btn.classList.add("loading"); icon.classList.add("spin");
   document.getElementById("errorBox").style.display="none";
-  document.getElementById("tableContainer").innerHTML=`<div class="state-box"><div class="pulse"></div><p>Fetching all wallets…</p></div>`;
+  document.getElementById("tableContainer").innerHTML=`<div class="state-box"><div class="pulse"></div><p>Fetching prices…</p></div>`;
 
   try {
     const prices=await getPrices();
